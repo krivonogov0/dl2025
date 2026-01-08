@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 import pytorch_lightning as pl
 
 
@@ -39,7 +39,8 @@ class DataModule(pl.LightningDataModule):
         train_unlabeled_csv='train_unlabeled.csv',
         test_csv='test.csv',
         batch_size=128,
-        num_workers=4
+        num_workers=4,
+        pseudo_data=None,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -48,7 +49,8 @@ class DataModule(pl.LightningDataModule):
         self.test_csv = os.path.join(data_dir, test_csv)
         self.batch_size = batch_size
         self.num_workers = num_workers
-        
+        self.pseudo_data = pseudo_data
+
         self.train_labeled_dataset = None
         self.test_dataset = None
         
@@ -58,21 +60,39 @@ class DataModule(pl.LightningDataModule):
     def setup(self, stage=None):
         self.train_labeled_dataset = CSVDataset(self.train_labeled_csv, has_target=True)
         self.test_dataset = CSVDataset(self.test_csv, has_target=True)
-        
-        sample_x, _ = self.train_labeled_dataset[0]
+
+        X_labeled = self.train_labeled_dataset.X
+        y_labeled = self.train_labeled_dataset.y
+
+        if self.pseudo_data is not None:
+            X_pseudo, y_pseudo = self.pseudo_data
+            assert X_pseudo.shape[1] == X_labeled.shape[1]
+            X_combined = np.vstack([X_labeled, X_pseudo])
+            y_combined = np.hstack([y_labeled, y_pseudo])
+            print(f"Added {len(y_pseudo)} pseudo-labeled samples.")
+        else:
+            X_combined = X_labeled
+            y_combined = y_labeled
+
+        self._train_dataset = TensorDataset(
+            torch.from_numpy(X_combined).float(),
+            torch.from_numpy(y_combined).long()
+        )
+
+        sample_x, _ = self.train_labeled_dataset[0]  
         self.input_dim = sample_x.shape[0]
-        
-        all_labels = self.train_labeled_dataset.y
-        self.n_classes = len(np.unique(all_labels))
-        
+        self.n_classes = len(np.unique(y_combined))  
+
         print(f'Input dimension: {self.input_dim}')
         print(f'Number of classes: {self.n_classes}')
         print(f'Labeled train samples: {len(self.train_labeled_dataset)}')
+        if self.pseudo_data is not None:
+            print(f'Total train samples (labeled + pseudo): {len(self._train_dataset)}')
         print(f'Test samples: {len(self.test_dataset)}')
-    
+
     def train_dataloader(self):
         return DataLoader(
-            self.train_labeled_dataset,
+            self._train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
